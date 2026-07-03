@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import datetime
 
 # --- 1. KONFIGURASI WEB & TAMPILAN AWAL ---
@@ -14,7 +14,41 @@ except Exception:
     st.error("⚠️ Brankas Rahasia (Secrets) belum diatur di Streamlit Cloud!")
     st.stop()
 
-# Menu Sidebar
+# --- 2. KONEKSI & OPTIMASI DATABASE ---
+@st.cache_resource
+def init_connection():
+    return create_engine(DB_URL)
+
+engine = init_connection()
+
+# MEMBUAT "DAFTAR ISI" (INDEX) DI DATABASE AGAR PENCARIAN SANGAT CEPAT
+try:
+    with engine.begin() as conn:
+        conn.execute(text('CREATE INDEX IF NOT EXISTS idx_date_ticker ON data_eod ("Date", "Ticker")'))
+except Exception:
+    pass
+
+# CACHE TARIK DATA: Hanya tarik data 1 tahun ke belakang dari tanggal yang dipilih (Super Ringan!)
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_optimized_data(target_end_date):
+    temp_engine = create_engine(DB_URL)
+    # Tarik mundur 365 hari kalender agar cukup untuk MA200 dan RS50
+    start_calc_date = target_end_date - datetime.timedelta(days=365)
+    
+    query = f"""
+        SELECT * FROM data_eod 
+        WHERE "Date" >= '{start_calc_date.strftime('%Y-%m-%d')}' 
+        AND "Date" <= '{target_end_date.strftime('%Y-%m-%d')}'
+    """
+    return pd.read_sql_query(query, con=temp_engine)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_latest_date():
+    temp_engine = create_engine(DB_URL)
+    res = pd.read_sql_query('SELECT MAX("Date") as max_date FROM data_eod', con=temp_engine)
+    return res['max_date'].iloc[0] if not res.empty else None
+
+# --- 3. MENU SIDEBAR ---
 st.sidebar.header("🔐 Area Admin")
 admin_input = st.sidebar.text_input("Masukkan Password Admin", type="password")
 IS_ADMIN = (admin_input == ADMIN_PASSWORD)
@@ -49,28 +83,7 @@ explore_btn = st.sidebar.button("🚀 Explore", use_container_width=True)
 # JUDUL UTAMA HALAMAN
 st.title("📱 RLA Hybrid AST LITE v7 (Elite Defensive)")
 
-# --- 2. MESIN DATABASE & MEMORI PINTAR (CACHE) ---
-@st.cache_resource
-def init_connection():
-    return create_engine(DB_URL)
-
-engine = init_connection()
-
-# Cache khusus untuk narik data utama
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_all_data():
-    temp_engine = create_engine(DB_URL)
-    return pd.read_sql_table('data_eod', con=temp_engine)
-
-# Cache khusus HANYA untuk ngecek tanggal (Sangat Ringan & Anti Hang)
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_latest_date():
-    temp_engine = create_engine(DB_URL)
-    # Gunakan LIMIT 1 jauh lebih cepat dari MAX() untuk tabel raksasa
-    res = pd.read_sql_query('SELECT "Date" FROM data_eod ORDER BY "Date" DESC LIMIT 1', con=temp_engine)
-    return res['Date'].iloc[0] if not res.empty else None
-
-# --- 3. INFORMASI STATUS DATABASE ---
+# --- 4. INFORMASI STATUS DATABASE ---
 with st.spinner("📡 Mengecek status database..."):
     try:
         latest_date = get_latest_date()
@@ -83,7 +96,7 @@ with st.spinner("📡 Mengecek status database..."):
 
 st.write("---")
 
-# --- 4. PANEL ADMIN (UPLOAD EOD HARIAN) ---
+# --- 5. PANEL ADMIN (UPLOAD EOD HARIAN) ---
 if IS_ADMIN:
     st.sidebar.markdown("---")
     st.sidebar.success("Login Admin Berhasil!")
@@ -114,12 +127,12 @@ if IS_ADMIN:
             df_clean.to_sql('data_eod', con=engine, if_exists='append', index=False, chunksize=5000, method='multi')
             
             # Hapus memori lama agar data hari ini bisa masuk ke layar
-            load_all_data.clear() 
+            load_optimized_data.clear() 
             get_latest_date.clear()
             
             st.success("✅ Data Harian berhasil ditambahkan! Refresh web untuk melihat hasil.")
 
-# --- 5. MESIN SCREENER PUBLIK ---
+# --- 6. MESIN SCREENER PUBLIK ---
 st.write("### 🚀 Hasil Screener V7")
 
 if explore_btn:
@@ -127,8 +140,9 @@ if explore_btn:
         st.error("⚠️ 'Dari Tanggal' tidak boleh lebih besar dari 'Sampai Tanggal'.")
     else:
         try:
-            with st.spinner('Membaca Memori & Mengeksekusi Algoritma (Lebih Cepat)...'):
-                df_db = load_all_data() 
+            with st.spinner('Menarik potongan data yang dibutuhkan & Mengeksekusi Algoritma (Super Cepat)...'):
+                # HANYA TARIK 1 TAHUN DATA, BUKAN 6 TAHUN!
+                df_db = load_optimized_data(end_date)
                 
                 if not df_db.empty:
                     df_db['Date_dt'] = pd.to_datetime(df_db['Date'])
