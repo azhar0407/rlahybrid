@@ -21,9 +21,14 @@ def init_connection():
 
 engine = init_connection()
 
+# FITUR BARU: Memori Pintar (Cache) agar server tidak hang saat menarik jutaan data
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_all_data():
+    temp_engine = create_engine(DB_URL)
+    return pd.read_sql_table('data_eod', con=temp_engine)
+
 # --- 2. INFORMASI STATUS DATABASE ---
 try:
-    # Membaca hanya 1 nilai tanggal paling baru dari database (Sangat Cepat)
     latest_date_query = pd.read_sql_query('SELECT MAX("Date") as max_date FROM data_eod', con=engine)
     latest_date = latest_date_query['max_date'].iloc[0]
     if latest_date:
@@ -52,7 +57,6 @@ liq_min = st.sidebar.number_input("Min Likuiditas (Miliar)", value=10, min_value
 st.sidebar.markdown("---")
 st.sidebar.header("🔍 Mode Eksplorasi")
 
-# Pemilihan Ticker
 ticker_mode = st.sidebar.radio("Target Saham:", ["Semua Saham (*All Symbols*)", "Pilih Saham Custom"])
 selected_tickers = []
 if ticker_mode == "Pilih Saham Custom":
@@ -60,7 +64,6 @@ if ticker_mode == "Pilih Saham Custom":
     if ticker_input:
         selected_tickers = [t.strip().upper() for t in ticker_input.split(",")]
 
-# Pemilihan Tanggal
 today = datetime.date.today()
 col1, col2 = st.sidebar.columns(2)
 with col1:
@@ -99,6 +102,8 @@ if IS_ADMIN:
                 
             df_clean = df_clean[df_clean['Volume'] > 0]
             df_clean.to_sql('data_eod', con=engine, if_exists='append', index=False, chunksize=5000, method='multi')
+            # Membersihkan memori (cache) agar data baru terbaca
+            load_all_data.clear() 
             st.success("✅ Data Harian berhasil ditambahkan dalam hitungan detik! Refresh web untuk melihat.")
 
 # --- 6. MESIN SCREENER PUBLIK ---
@@ -109,15 +114,15 @@ if explore_btn:
         st.error("⚠️ 'Dari Tanggal' tidak boleh lebih besar dari 'Sampai Tanggal'.")
     else:
         try:
-            with st.spinner('Menarik data & Mengeksekusi Algoritma...'):
-                df_db = pd.read_sql_table('data_eod', con=engine)
+            with st.spinner('Membaca Memori & Mengeksekusi Algoritma (Lebih Cepat)...'):
+                # Gunakan fungsi cache agar tidak download ulang database
+                df_db = load_all_data() 
                 
                 if not df_db.empty:
                     df_db['Date_dt'] = pd.to_datetime(df_db['Date'])
                     df_db = df_db.drop_duplicates(subset=['Ticker', 'Date'], keep='last')
                     df_db = df_db.sort_values(by=['Ticker', 'Date_dt'])
                     
-                    # 1. Indikator Dasar
                     df_db['MA200'] = df_db.groupby('Ticker')['Close'].transform(lambda x: x.rolling(200).mean())
                     df_db['AvgVol20'] = df_db.groupby('Ticker')['Volume'].transform(lambda x: x.rolling(20).mean())
                     df_db['AvgVal20'] = df_db.groupby('Ticker').apply(
@@ -127,15 +132,16 @@ if explore_btn:
                     df_db['NetForeign'] = df_db['ForeignBuy'] - df_db['ForeignSell']
                     df_db['ROC20'] = df_db.groupby('Ticker')['Close'].transform(lambda x: x.pct_change(periods=20) * 100)
                     
-                    # 2. RS50
                     idx_df = df_db[df_db['Ticker'] == '^JKSE'][['Date_dt', 'Close']].rename(columns={'Close': 'IdxClose'})
                     df_db = pd.merge(df_db, idx_df, on='Date_dt', how='left')
-                    df_db['IdxClose'] = df_db['IdxClose'].fillna(method='ffill').fillna(method='bfill')
+                    
+                    # PERBAIKAN PANDAS: Menggunakan .ffill() dan .bfill() menggantikan method='ffill'
+                    df_db['IdxClose'] = df_db['IdxClose'].ffill().bfill()
+                    
                     df_db['SafeIdx'] = np.where(df_db['IdxClose'] > 0, df_db['IdxClose'], df_db['Close'])
                     df_db['Ratio'] = df_db['Close'] / df_db['SafeIdx']
                     df_db['RS50'] = df_db.groupby('Ticker')['Ratio'].transform(lambda x: (x / x.rolling(50).mean() - 1) * 100)
                     
-                    # 3. ATR 14 (VBF) & ATR 10 (Target Profit)
                     df_db['PrevClose'] = df_db.groupby('Ticker')['Close'].shift(1)
                     df_db['TR'] = df_db[['High', 'PrevClose']].max(axis=1) - df_db[['Low', 'PrevClose']].min(axis=1)
                     
@@ -151,7 +157,6 @@ if explore_btn:
                     ).reset_index(level=0, drop=True)
                     df_db['Range_Wajib'] = df_db['Range_MA20'] + (vbf_multi * df_db['ATR14'])
                     
-                    # --- PEMOTONGAN DATA (DATE RANGE & TICKER) ---
                     df_explore = df_db[(df_db['Date_dt'].dt.date >= start_date) & (df_db['Date_dt'].dt.date <= end_date)].copy()
                     
                     if ticker_mode == "Pilih Saham Custom" and selected_tickers:
@@ -160,7 +165,6 @@ if explore_btn:
                     if df_explore.empty:
                         st.warning("⚠️ Tidak ada data bursa pada rentang tanggal tersebut.")
                     else:
-                        # --- PENERAPAN SYARAT V7 ---
                         cond_trend = (df_explore['Close'] > df_explore['MA200']) if use_ma200 else True
                         cond_vol = (df_explore['Volume'] > (vol_multi * df_explore['AvgVol20'])) & (df_explore['Close'] > df_explore['PrevClose'])
                         cond_foreign = (df_explore['NetForeign'] > 0) if req_foreign else True
@@ -169,32 +173,21 @@ if explore_btn:
                         cond_rs50 = df_explore['RS50'] > 0
                         cond_late = df_explore['ROC20'] < 25
                         
-                        # Eksekusi Filter
                         final_signal = df_explore[cond_trend & cond_vol & cond_foreign & cond_vbf & cond_liq & cond_rs50 & cond_late].copy()
                         
                         st.info(f"🔎 **Area Pencarian:** {start_date.strftime('%d %b %Y')} s/d {end_date.strftime('%d %b %Y')}")
                         
                         if not final_signal.empty:
-                            # MEMBENTUK KOLOM PERSIS SEPERTI AMIBROKER
                             final_signal['Tanggal'] = final_signal['Date_dt'].dt.strftime('%d/%m/%Y')
                             final_signal['Harga Entry'] = final_signal['Close']
-                            
-                            # Kalkulasi Risiko (Risk) = UT Key Value (2.5) * ATR(10)
                             final_signal['Risk'] = 2.5 * final_signal['ATR10']
-                            
-                            # Target Profit 1 (1.5R) & Target Profit 2 (2.5R) & Hard SL (-10%)
                             final_signal['Max SL (-10%)'] = final_signal['Harga Entry'] * 0.90
                             final_signal['Target TP1'] = final_signal['Harga Entry'] + (final_signal['Risk'] * 1.5)
                             final_signal['Target TP2'] = final_signal['Harga Entry'] + (final_signal['Risk'] * 2.5)
-                            
-                            # Vol Surge & RS50
                             final_signal['Vol Surge (x)'] = final_signal['Volume'] / final_signal['AvgVol20']
                             final_signal['RS50 %'] = final_signal['RS50']
                             
-                            # Urutkan dari tanggal terbaru ke terlama
                             final_signal = final_signal.sort_values(by=['Date_dt', 'Ticker'], ascending=[False, True])
-                            
-                            # Daftar Kolom Final
                             cols_to_show = ['Tanggal', 'Ticker', 'Harga Entry', 'Max SL (-10%)', 'Target TP1', 'Target TP2', 'Vol Surge (x)', 'RS50 %']
                             
                             st.dataframe(final_signal[cols_to_show].style.format({
