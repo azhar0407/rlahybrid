@@ -7,7 +7,6 @@ import datetime
 # --- 1. KONFIGURASI WEB & TAMPILAN AWAL ---
 st.set_page_config(page_title="RLA V7 Screener", layout="wide", page_icon="🛡️")
 
-# MUNCULKAN SIDEBAR LEBIH DULU AGAR WEB LANGSUNG TERLIHAT HIDUP
 try:
     ADMIN_PASSWORD = st.secrets["ADMIN_PASS"]
     DB_URL = st.secrets["DB_URL"]
@@ -50,29 +49,37 @@ explore_btn = st.sidebar.button("🚀 Explore", use_container_width=True)
 # JUDUL UTAMA HALAMAN
 st.title("📱 RLA Hybrid AST LITE v7 (Elite Defensive)")
 
-# --- 2. MESIN DATABASE ---
+# --- 2. MESIN DATABASE & MEMORI PINTAR (CACHE) ---
 @st.cache_resource
 def init_connection():
     return create_engine(DB_URL)
 
 engine = init_connection()
 
+# Cache khusus untuk narik data utama
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_all_data():
     temp_engine = create_engine(DB_URL)
     return pd.read_sql_table('data_eod', con=temp_engine)
 
-# --- 3. INFORMASI STATUS DATABASE (DENGAN SPINNER LOADING) ---
-with st.spinner("📡 Menyambungkan ke Cloud & Memindai Jutaan Data..."):
+# Cache khusus HANYA untuk ngecek tanggal (Sangat Ringan & Anti Hang)
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_latest_date():
+    temp_engine = create_engine(DB_URL)
+    # Gunakan LIMIT 1 jauh lebih cepat dari MAX() untuk tabel raksasa
+    res = pd.read_sql_query('SELECT "Date" FROM data_eod ORDER BY "Date" DESC LIMIT 1', con=temp_engine)
+    return res['Date'].iloc[0] if not res.empty else None
+
+# --- 3. INFORMASI STATUS DATABASE ---
+with st.spinner("📡 Mengecek status database..."):
     try:
-        latest_date_query = pd.read_sql_query('SELECT MAX("Date") as max_date FROM data_eod', con=engine)
-        latest_date = latest_date_query['max_date'].iloc[0]
+        latest_date = get_latest_date()
         if latest_date:
             st.success(f"📅 **Status Server:** Database aktif. Data EOD terakhir diupdate pada **{latest_date}**")
         else:
             st.warning("⚠️ Database masih kosong. Silakan login Admin dan upload data pertama Anda.")
     except Exception:
-        st.warning("⚠️ Database belum memiliki tabel. Silakan login Admin untuk inisialisasi.")
+        st.warning("⚠️ Gagal menyambung ke database. Sistem mungkin sedang sibuk, silakan refresh halaman (F5).")
 
 st.write("---")
 
@@ -105,8 +112,12 @@ if IS_ADMIN:
                 
             df_clean = df_clean[df_clean['Volume'] > 0]
             df_clean.to_sql('data_eod', con=engine, if_exists='append', index=False, chunksize=5000, method='multi')
+            
+            # Hapus memori lama agar data hari ini bisa masuk ke layar
             load_all_data.clear() 
-            st.success("✅ Data Harian berhasil ditambahkan dalam hitungan detik! Refresh web untuk melihat.")
+            get_latest_date.clear()
+            
+            st.success("✅ Data Harian berhasil ditambahkan! Refresh web untuk melihat hasil.")
 
 # --- 5. MESIN SCREENER PUBLIK ---
 st.write("### 🚀 Hasil Screener V7")
