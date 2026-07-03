@@ -8,7 +8,6 @@ import os
 st.set_page_config(page_title="RLA V7 Screener", layout="wide", page_icon="🛡️")
 st.title("📱 RLA Hybrid AST LITE v7 (Elite Defensive)")
 
-# Mengambil rahasia dari Brankas (Secrets) Streamlit Cloud
 try:
     ADMIN_PASSWORD = st.secrets["ADMIN_PASS"]
     DB_URL = st.secrets["DB_URL"]
@@ -16,7 +15,6 @@ except Exception:
     st.error("⚠️ Brankas Rahasia (Secrets) belum diatur di Streamlit Cloud!")
     st.stop()
 
-# Mesin Koneksi Database SQL
 @st.cache_resource
 def init_connection():
     return create_engine(DB_URL)
@@ -36,25 +34,22 @@ use_vbf = st.sidebar.checkbox("Gunakan VBF?", value=True)
 vbf_multi = st.sidebar.slider("VBF ATR Multiplier", 0.5, 3.0, 1.2, 0.1)
 vol_multi = st.sidebar.slider("Minimal Ledakan Volume (x)", 1.0, 5.0, 1.5, 0.1)
 
-# --- 4. PANEL ADMIN (UPLOAD DATA) ---
+# --- 4. PANEL ADMIN (UPLOAD EOD HARIAN - ULTRA FAST) ---
 if IS_ADMIN:
     st.sidebar.success("Login Admin Berhasil!")
-    st.write("### 🛠️ Panel Update Database (Admin Only)")
-    st.info("Upload file Historis (CSV) atau file EOD Harian (XLSX). Data otomatis tersimpan permanen di Supabase PostgreSQL.")
+    st.write("### 🛠️ Panel Update Database")
     
     uploaded_file = st.file_uploader("Pilih file EOD", type=["csv", "xlsx"], label_visibility="hidden")
 
     if uploaded_file is not None:
-        with st.spinner('Memproses data dan menyicil pengiriman ke Cloud (Mungkin butuh waktu 5-10 menit untuk Historis)...'):
+        with st.spinner('Menyuntikkan data EOD harian ke Cloud...'):
             df_clean = pd.DataFrame()
             
             # CEK FORMAT FILE
             if uploaded_file.name.endswith('.csv'):
-                # Format AmiBroker
                 df_clean = pd.read_csv(uploaded_file)
                 df_clean['Date'] = pd.to_datetime(df_clean['Date'], format='mixed', dayfirst=True).dt.strftime('%Y-%m-%d')
             else:
-                # Format Mentah dari HP (Excel)
                 df_raw = pd.read_excel(uploaded_file)
                 df_clean['Ticker'] = df_raw['Kode Saham']
                 df_clean['Date'] = pd.to_datetime(df_raw['Tanggal Perdagangan Terakhir']).dt.strftime('%Y-%m-%d')
@@ -67,20 +62,9 @@ if IS_ADMIN:
                 df_clean['ForeignSell'] = df_raw['Foreign Sell']
                 df_clean = df_clean[df_clean['Volume'] > 0]
 
-            # GABUNG KE DATABASE PERMANEN
-            try:
-                df_history = pd.read_sql_table('data_eod', con=engine)
-                df_full = pd.concat([df_history, df_clean], ignore_index=True)
-            except ValueError:
-                # Jika database benar-benar baru
-                df_full = df_clean.copy()
-
-            # Bersihkan duplikat
-            df_full = df_full.drop_duplicates(subset=['Ticker', 'Date'], keep='last')
-            
-            # KIRIM KE SUPABASE DENGAN CHUNKING (Cicilan 5.000 baris agar RAM tidak jebol)
-            df_full.to_sql('data_eod', con=engine, if_exists='replace', index=False, chunksize=5000, method='multi')
-            st.success("✅ Database Supabase berhasil diperbarui secara permanen!")
+            # KIRIM DATA BARU SAJA KE SUPABASE (MODE APPEND) - HANYA BUTUH 1 DETIK!
+            df_clean.to_sql('data_eod', con=engine, if_exists='append', index=False, chunksize=5000, method='multi')
+            st.success("✅ Data Harian berhasil ditambahkan dalam hitungan detik!")
 
 # --- 5. MESIN SCREENER PUBLIK ---
 st.write("---")
@@ -92,6 +76,9 @@ try:
         
         if not df_db.empty:
             df_db['Date_dt'] = pd.to_datetime(df_db['Date'])
+            
+            # BERSIHKAN DATA GANDA (Jika Anda tidak sengaja upload 2x di hari yang sama)
+            df_db = df_db.drop_duplicates(subset=['Ticker', 'Date'], keep='last')
             df_db = df_db.sort_values(by=['Ticker', 'Date_dt'])
             
             # Kalkulasi Indikator
@@ -104,7 +91,6 @@ try:
             df_db['TR'] = df_db[['High', 'PrevClose']].max(axis=1) - df_db[['Low', 'PrevClose']].min(axis=1)
             df_db['ATR14'] = df_db.groupby('Ticker')['TR'].transform(lambda x: x.rolling(14).mean())
             
-            # Fix Future Warning Pandas untuk apply
             df_db['Range_MA20'] = df_db.groupby('Ticker').apply(
                 lambda x: (x['High'] - x['Low']).rolling(20).mean(),
                 include_groups=False
