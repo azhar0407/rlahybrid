@@ -4,10 +4,10 @@ import numpy as np
 from sqlalchemy import create_engine
 import datetime
 
-# --- 1. KONFIGURASI WEB & DATABASE ---
+# --- 1. KONFIGURASI WEB & TAMPILAN AWAL ---
 st.set_page_config(page_title="RLA V7 Screener", layout="wide", page_icon="🛡️")
-st.title("📱 RLA Hybrid AST LITE v7 (Elite Defensive)")
 
+# MUNCULKAN SIDEBAR LEBIH DULU AGAR WEB LANGSUNG TERLIHAT HIDUP
 try:
     ADMIN_PASSWORD = st.secrets["ADMIN_PASS"]
     DB_URL = st.secrets["DB_URL"]
@@ -15,37 +15,11 @@ except Exception:
     st.error("⚠️ Brankas Rahasia (Secrets) belum diatur di Streamlit Cloud!")
     st.stop()
 
-@st.cache_resource
-def init_connection():
-    return create_engine(DB_URL)
-
-engine = init_connection()
-
-# FITUR BARU: Memori Pintar (Cache) agar server tidak hang saat menarik jutaan data
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_all_data():
-    temp_engine = create_engine(DB_URL)
-    return pd.read_sql_table('data_eod', con=temp_engine)
-
-# --- 2. INFORMASI STATUS DATABASE ---
-try:
-    latest_date_query = pd.read_sql_query('SELECT MAX("Date") as max_date FROM data_eod', con=engine)
-    latest_date = latest_date_query['max_date'].iloc[0]
-    if latest_date:
-        st.success(f"📅 **Status Server:** Database aktif. Data EOD terakhir diupdate pada **{latest_date}**")
-    else:
-        st.warning("⚠️ Database masih kosong. Silakan login Admin dan upload data pertama Anda.")
-except Exception:
-    st.warning("⚠️ Database belum memiliki tabel. Silakan login Admin untuk inisialisasi.")
-
-st.write("---")
-
-# --- 3. SISTEM LOGIN ADMIN ---
+# Menu Sidebar
 st.sidebar.header("🔐 Area Admin")
 admin_input = st.sidebar.text_input("Masukkan Password Admin", type="password")
 IS_ADMIN = (admin_input == ADMIN_PASSWORD)
 
-# --- 4. MENU PARAMETER & EXPLORATION PUBLIK ---
 st.sidebar.header("⚙️ Parameter V7")
 use_ma200 = st.sidebar.checkbox("Wajib Uptrend MA200?", value=True)
 req_foreign = st.sidebar.checkbox("Wajib Asing Net Buy?", value=True)
@@ -73,7 +47,36 @@ with col2:
 
 explore_btn = st.sidebar.button("🚀 Explore", use_container_width=True)
 
-# --- 5. PANEL ADMIN (UPLOAD EOD HARIAN) ---
+# JUDUL UTAMA HALAMAN
+st.title("📱 RLA Hybrid AST LITE v7 (Elite Defensive)")
+
+# --- 2. MESIN DATABASE ---
+@st.cache_resource
+def init_connection():
+    return create_engine(DB_URL)
+
+engine = init_connection()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_all_data():
+    temp_engine = create_engine(DB_URL)
+    return pd.read_sql_table('data_eod', con=temp_engine)
+
+# --- 3. INFORMASI STATUS DATABASE (DENGAN SPINNER LOADING) ---
+with st.spinner("📡 Menyambungkan ke Cloud & Memindai Jutaan Data..."):
+    try:
+        latest_date_query = pd.read_sql_query('SELECT MAX("Date") as max_date FROM data_eod', con=engine)
+        latest_date = latest_date_query['max_date'].iloc[0]
+        if latest_date:
+            st.success(f"📅 **Status Server:** Database aktif. Data EOD terakhir diupdate pada **{latest_date}**")
+        else:
+            st.warning("⚠️ Database masih kosong. Silakan login Admin dan upload data pertama Anda.")
+    except Exception:
+        st.warning("⚠️ Database belum memiliki tabel. Silakan login Admin untuk inisialisasi.")
+
+st.write("---")
+
+# --- 4. PANEL ADMIN (UPLOAD EOD HARIAN) ---
 if IS_ADMIN:
     st.sidebar.markdown("---")
     st.sidebar.success("Login Admin Berhasil!")
@@ -102,11 +105,10 @@ if IS_ADMIN:
                 
             df_clean = df_clean[df_clean['Volume'] > 0]
             df_clean.to_sql('data_eod', con=engine, if_exists='append', index=False, chunksize=5000, method='multi')
-            # Membersihkan memori (cache) agar data baru terbaca
             load_all_data.clear() 
             st.success("✅ Data Harian berhasil ditambahkan dalam hitungan detik! Refresh web untuk melihat.")
 
-# --- 6. MESIN SCREENER PUBLIK ---
+# --- 5. MESIN SCREENER PUBLIK ---
 st.write("### 🚀 Hasil Screener V7")
 
 if explore_btn:
@@ -115,7 +117,6 @@ if explore_btn:
     else:
         try:
             with st.spinner('Membaca Memori & Mengeksekusi Algoritma (Lebih Cepat)...'):
-                # Gunakan fungsi cache agar tidak download ulang database
                 df_db = load_all_data() 
                 
                 if not df_db.empty:
@@ -134,10 +135,7 @@ if explore_btn:
                     
                     idx_df = df_db[df_db['Ticker'] == '^JKSE'][['Date_dt', 'Close']].rename(columns={'Close': 'IdxClose'})
                     df_db = pd.merge(df_db, idx_df, on='Date_dt', how='left')
-                    
-                    # PERBAIKAN PANDAS: Menggunakan .ffill() dan .bfill() menggantikan method='ffill'
                     df_db['IdxClose'] = df_db['IdxClose'].ffill().bfill()
-                    
                     df_db['SafeIdx'] = np.where(df_db['IdxClose'] > 0, df_db['IdxClose'], df_db['Close'])
                     df_db['Ratio'] = df_db['Close'] / df_db['SafeIdx']
                     df_db['RS50'] = df_db.groupby('Ticker')['Ratio'].transform(lambda x: (x / x.rolling(50).mean() - 1) * 100)
