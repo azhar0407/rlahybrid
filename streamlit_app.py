@@ -1,40 +1,30 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 import datetime
 
 # --- 1. KONFIGURASI WEB & TAMPILAN AWAL ---
 st.set_page_config(page_title="RLA V7 Screener", layout="wide", page_icon="🛡️")
+st.title("📱 RLA Hybrid AST LITE v7 (Elite Defensive)")
 
 try:
     ADMIN_PASSWORD = st.secrets["ADMIN_PASS"]
     DB_URL = st.secrets["DB_URL"]
 except Exception:
-    st.error("⚠️ Brankas Rahasia (Secrets) belum diatur di Streamlit Cloud!")
+    st.error("⚠️ Brankas Rahasia (Secrets) belum diatur!")
     st.stop()
 
-# --- 2. KONEKSI & OPTIMASI DATABASE ---
 @st.cache_resource
 def init_connection():
     return create_engine(DB_URL)
 
 engine = init_connection()
 
-# MEMBUAT "DAFTAR ISI" (INDEX) DI DATABASE AGAR PENCARIAN SANGAT CEPAT
-try:
-    with engine.begin() as conn:
-        conn.execute(text('CREATE INDEX IF NOT EXISTS idx_date_ticker ON data_eod ("Date", "Ticker")'))
-except Exception:
-    pass
-
-# CACHE TARIK DATA: Hanya tarik data 1 tahun ke belakang dari tanggal yang dipilih (Super Ringan!)
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_optimized_data(target_end_date):
     temp_engine = create_engine(DB_URL)
-    # Tarik mundur 365 hari kalender agar cukup untuk MA200 dan RS50
     start_calc_date = target_end_date - datetime.timedelta(days=365)
-    
     query = f"""
         SELECT * FROM data_eod 
         WHERE "Date" >= '{start_calc_date.strftime('%Y-%m-%d')}' 
@@ -42,13 +32,7 @@ def load_optimized_data(target_end_date):
     """
     return pd.read_sql_query(query, con=temp_engine)
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_latest_date():
-    temp_engine = create_engine(DB_URL)
-    res = pd.read_sql_query('SELECT MAX("Date") as max_date FROM data_eod', con=temp_engine)
-    return res['max_date'].iloc[0] if not res.empty else None
-
-# --- 3. MENU SIDEBAR ---
+# --- 2. MENU SIDEBAR ---
 st.sidebar.header("🔐 Area Admin")
 admin_input = st.sidebar.text_input("Masukkan Password Admin", type="password")
 IS_ADMIN = (admin_input == ADMIN_PASSWORD)
@@ -67,7 +51,7 @@ st.sidebar.header("🔍 Mode Eksplorasi")
 ticker_mode = st.sidebar.radio("Target Saham:", ["Semua Saham (*All Symbols*)", "Pilih Saham Custom"])
 selected_tickers = []
 if ticker_mode == "Pilih Saham Custom":
-    ticker_input = st.sidebar.text_input("Masukkan Kode Saham (cth: BBCA, BMRI, BJBR)")
+    ticker_input = st.sidebar.text_input("Masukkan Kode Saham (cth: BBCA, BMRI)")
     if ticker_input:
         selected_tickers = [t.strip().upper() for t in ticker_input.split(",")]
 
@@ -78,36 +62,30 @@ with col1:
 with col2:
     end_date = st.date_input("Sampai Tanggal", today)
 
+# TOMBOL CEK STATUS KITA PINDAH KE SINI AGAR WEB TIDAK MACET SAAT AWAL DIBUKA
+if st.sidebar.button("🔄 Cek Status Database"):
+    with st.spinner("Mengecek database..."):
+        try:
+            res = pd.read_sql_query('SELECT MAX("Date") as max_date FROM data_eod', con=engine)
+            if not res.empty and res['max_date'].iloc[0]:
+                st.sidebar.success(f"✅ Data EOD terakhir: {res['max_date'].iloc[0]}")
+            else:
+                st.sidebar.warning("⚠️ Database masih kosong.")
+        except Exception:
+            st.sidebar.error("⚠️ Gagal menyambung ke database.")
+
 explore_btn = st.sidebar.button("🚀 Explore", use_container_width=True)
-
-# JUDUL UTAMA HALAMAN
-st.title("📱 RLA Hybrid AST LITE v7 (Elite Defensive)")
-
-# --- 4. INFORMASI STATUS DATABASE ---
-with st.spinner("📡 Mengecek status database..."):
-    try:
-        latest_date = get_latest_date()
-        if latest_date:
-            st.success(f"📅 **Status Server:** Database aktif. Data EOD terakhir diupdate pada **{latest_date}**")
-        else:
-            st.warning("⚠️ Database masih kosong. Silakan login Admin dan upload data pertama Anda.")
-    except Exception:
-        st.warning("⚠️ Gagal menyambung ke database. Sistem mungkin sedang sibuk, silakan refresh halaman (F5).")
 
 st.write("---")
 
-# --- 5. PANEL ADMIN (UPLOAD EOD HARIAN) ---
+# --- 3. PANEL ADMIN (UPLOAD EOD HARIAN) ---
 if IS_ADMIN:
-    st.sidebar.markdown("---")
-    st.sidebar.success("Login Admin Berhasil!")
     st.write("### 🛠️ Panel Update Database")
-    
     uploaded_file = st.file_uploader("Pilih file EOD", type=["csv", "xlsx"], label_visibility="hidden")
 
     if uploaded_file is not None:
         with st.spinner('Menyuntikkan data EOD harian ke Cloud...'):
             df_clean = pd.DataFrame()
-            
             if uploaded_file.name.endswith('.csv'):
                 df_clean = pd.read_csv(uploaded_file)
                 df_clean['Date'] = pd.to_datetime(df_clean['Date'], format='mixed', dayfirst=True).dt.strftime('%Y-%m-%d')
@@ -125,14 +103,10 @@ if IS_ADMIN:
                 
             df_clean = df_clean[df_clean['Volume'] > 0]
             df_clean.to_sql('data_eod', con=engine, if_exists='append', index=False, chunksize=5000, method='multi')
-            
-            # Hapus memori lama agar data hari ini bisa masuk ke layar
             load_optimized_data.clear() 
-            get_latest_date.clear()
-            
             st.success("✅ Data Harian berhasil ditambahkan! Refresh web untuk melihat hasil.")
 
-# --- 6. MESIN SCREENER PUBLIK ---
+# --- 4. MESIN SCREENER PUBLIK ---
 st.write("### 🚀 Hasil Screener V7")
 
 if explore_btn:
@@ -140,8 +114,7 @@ if explore_btn:
         st.error("⚠️ 'Dari Tanggal' tidak boleh lebih besar dari 'Sampai Tanggal'.")
     else:
         try:
-            with st.spinner('Menarik potongan data yang dibutuhkan & Mengeksekusi Algoritma (Super Cepat)...'):
-                # HANYA TARIK 1 TAHUN DATA, BUKAN 6 TAHUN!
+            with st.spinner('Menarik potongan data & Mengeksekusi Algoritma (Super Cepat)...'):
                 df_db = load_optimized_data(end_date)
                 
                 if not df_db.empty:
